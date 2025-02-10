@@ -1,0 +1,823 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8">
+  <title>TCube - Animazione terremoti 3D - Campi Flegrei (EPSG:32633N)</title>
+  <!-- Import map per Three.js (versione 0.173.0) -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.173.0/build/three.module.js"
+      }
+    }
+  </script>
+  <style>
+    /* Sfondo con gradiente: grigio chiaro in basso, grigio scuro in alto */
+    body { 
+      margin: 0; 
+      overflow: hidden; 
+      background: linear-gradient(to top, #cccccc, #333333);
+    }
+    canvas { display: block; }
+    /* UI Container (in alto a sinistra) */
+    #uiContainer {
+      position: absolute;
+      top: 10px;
+      left: 10px;
+      background: rgba(255,255,255,0.8);
+      padding: 10px;
+      border-radius: 8px;
+      font-family: sans-serif;
+      z-index: 20;
+    }
+    #uiContainer input, #uiContainer button {
+      margin: 5px 0;
+      display: block;
+    }
+    /* Time Slider container (centrato in alto) */
+    #timeSliderContainer {
+      position: absolute;
+      top: 10px;
+      left: 25%;
+      width: 50%;
+      z-index: 20;
+    }
+    #timeSlider {
+      width: 100%;
+    }
+    #timeSliderContainer datalist {
+      display: flex;
+      justify-content: space-between;
+    }
+    /* Indicatore dei frame */
+    #frameIndicator {
+      margin-top: 5px;
+      text-align: center;
+      font-weight: bold;
+    }
+    /* Tooltip styling */
+    #tooltip {
+      position: absolute;
+      background: rgba(255,255,255,0.9);
+      border: 1px solid #333;
+      padding: 14px;
+      border-radius: 4px;
+      font-family: sans-serif;
+      z-index: 30;
+      pointer-events: auto;
+    }
+    #tooltip .close {
+      position: absolute;
+      top: 1px;
+      right: 1px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+  </style>
+</head>
+<body>
+  <!-- UI Container -->
+  <div id="uiContainer">
+    <label>Opacità mappa: <span id="opacityLabel">100%</span></label>
+    <input type="range" id="opacitySlider" min="0" max="100" value="100">
+    <label>Carica CSV (terremoti):</label>
+    <input type="file" id="csvInput" accept=".csv">
+    <label>Data inizio:</label>
+    <input type="date" id="startDate">
+    <label>Data fine:</label>
+    <input type="date" id="endDate">
+    <button id="playButton">PLAY</button>
+    <button id="pauseButton">PAUSE</button>
+    <button id="resetButton">RESET</button>
+    <div id="frameIndicator">Frame: 0/60</div>
+  </div>
+  <!-- Time Slider -->
+  <div id="timeSliderContainer">
+    <input type="range" id="timeSlider" min="0" max="100" value="0" list="timeTicks">
+    <datalist id="timeTicks">
+      <option value="0" label="Inizio"></option>
+      <option value="100" label="Fine"></option>
+    </datalist>
+  </div>
+  <!-- Tooltip -->
+  <div id="tooltip" style="display: none;"></div>
+
+<div id="statsContainer" style="position: absolute; top: 10px; right: 10px; background: rgba(255,255,255,0.8); padding: 10px; border-radius: 8px; font-family: sans-serif; z-index: 20;">
+  <!-- Le statistiche verranno inserite qui -->
+</div>
+  
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/controls/OrbitControls.js';
+    import proj4 from 'https://cdn.skypack.dev/proj4';
+
+    // -------------------- COSTANTI GLOBALI --------------------
+    const GRID_SIZE = 10000;
+    const GRID_DIVISIONS = 100;
+    const AXES_LENGTH = 5000;
+    const HALF_SIZE = 5000;
+    const BOTTOM_Z = -10000;
+    const CUBE_SPACING = 1000;
+    const TOTAL_ANIM_DURATION = 60; // 60 secondi totali
+    const MAP_ZOOM = 15;
+
+    // -------------------- VARIABILI PER DATI & ANIMAZIONE --------------------
+    let originalData = [];
+    let earthquakeData = [];
+    let quakeSpheres = [];
+    let animStartTime = null;
+    let animEndTime = null;
+    let animationProgress = 0;
+    let animationPlaying = false;
+    let animationStartReal = null;
+    let originalStartDate = null;
+    let originalEndDate = null;
+
+    // -------------------- SCENA, CAMERA, RENDERER --------------------
+    const scene = new THREE.Scene();
+    scene.up.set(0, 0, 1);
+    const gridCenter = new THREE.Vector3(425300, 4519000, 0);
+    const camera = new THREE.PerspectiveCamera(55, window.innerWidth/window.innerHeight, 1, 30000);
+    camera.position.set(gridCenter.x + 10000, gridCenter.y - 10000, 10000);
+    camera.up.set(0, 0, 1);
+    camera.lookAt(gridCenter);
+    const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+    // Abilita ombre nel renderer
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setClearColor(0x000000, 0); // trasparente per il gradiente CSS
+    renderer.shadowMap.enabled = true;
+    document.body.appendChild(renderer.domElement);
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.target.copy(gridCenter);
+    controls.update();
+
+    // -------------------- LUCI & OMBRE --------------------
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 3);
+    directionalLight.position.set(15000, 15000, 15000);
+    directionalLight.castShadow = true;
+    directionalLight.shadow.mapSize.width = 4096; // aumenta la risoluzione
+    directionalLight.shadow.mapSize.height = 4096;
+    directionalLight.shadow.camera.left = -15000;
+    directionalLight.shadow.camera.right = 15000;
+    directionalLight.shadow.camera.top = 15000;
+    directionalLight.shadow.camera.bottom = -15000;
+    directionalLight.shadow.camera.near = 1;
+    directionalLight.shadow.camera.far = 30000;
+    scene.add(directionalLight);
+
+
+    // -------------------- UI ELEMENTS --------------------
+    const opacitySlider = document.getElementById('opacitySlider');
+    const opacityLabel = document.getElementById('opacityLabel');
+    const csvInput = document.getElementById('csvInput');
+    const startDateInput = document.getElementById('startDate');
+    const endDateInput = document.getElementById('endDate');
+    const playButton = document.getElementById('playButton');
+    const pauseButton = document.getElementById('pauseButton');
+    const resetButton = document.getElementById('resetButton');
+    const timeSlider = document.getElementById('timeSlider');
+    const frameIndicator = document.getElementById('frameIndicator');
+    const tooltip = document.getElementById('tooltip');
+
+    // -------------------- FUNZIONE makeTextSprite --------------------
+    function makeTextSprite(message, parameters) {
+      parameters = parameters || {};
+      const fontface = parameters.fontface || "Arial";
+      const fontsize = parameters.fontsize || 24;
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      context.font = fontsize + "px " + fontface;
+      const metrics = context.measureText(message);
+      const textWidth = metrics.width;
+      canvas.width = textWidth;
+      canvas.height = fontsize * 1.2;
+      context.font = fontsize + "px " + fontface;
+      context.fillStyle = parameters.fillStyle || "rgba(255,255,255,1.0)";
+      context.fillText(message, 0, fontsize);
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.needsUpdate = true;
+      const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+      const sprite = new THREE.Sprite(spriteMaterial);
+      sprite.scale.set(canvas.width, canvas.height, 1.0);
+      return sprite;
+    }
+
+    // -------------------- 1) ASSI E ASSE Z NEGATIVO --------------------
+    const zAxisMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
+    const zAxisGeom = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(gridCenter.x, gridCenter.y, 0),
+      new THREE.Vector3(gridCenter.x, gridCenter.y, BOTTOM_Z)
+    ]);
+    const zAxis = new THREE.Line(zAxisGeom, zAxisMaterial);
+    scene.add(zAxis);
+    for (let z = -100; z >= BOTTOM_Z; z -= 100) {
+      const tickGeom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(gridCenter.x, gridCenter.y, z),
+        new THREE.Vector3(gridCenter.x + 20, gridCenter.y, z)
+      ]);
+      const tick = new THREE.Line(tickGeom, zAxisMaterial);
+      scene.add(tick);
+      if (z % 1000 === 0) {
+        const label = makeTextSprite(z + " m", { fontsize: 32, fillStyle: "blue" });
+        label.position.set(gridCenter.x + 50, gridCenter.y, z);
+        scene.add(label);
+      }
+    }
+    const axesHelper = new THREE.AxesHelper(AXES_LENGTH);
+    axesHelper.position.copy(gridCenter);
+    scene.add(axesHelper);
+    const xLabel = makeTextSprite("X", { fontsize: 48, fillStyle: "red" });
+    xLabel.position.set(gridCenter.x + AXES_LENGTH + 200, gridCenter.y, 0);
+    scene.add(xLabel);
+    const yLabel = makeTextSprite("Y", { fontsize: 48, fillStyle: "green" });
+    yLabel.position.set(gridCenter.x, gridCenter.y + AXES_LENGTH + 200, 0);
+    scene.add(yLabel);
+    const zLabel = makeTextSprite("Z", { fontsize: 48, fillStyle: "blue" });
+    zLabel.position.set(gridCenter.x, gridCenter.y, 200);
+    scene.add(zLabel);
+
+    // -------------------- 2) CUBO DI 10 KM (FACCE LATERALI) --------------------
+    // Ripristiniamo le griglie per le facce laterali (la faccia superiore non viene aggiunta)
+    const cubeMat = new THREE.LineBasicMaterial({ color: 0x000000 });
+    function createLine(start, end, material) {
+      return new THREE.Line(new THREE.BufferGeometry().setFromPoints([start, end]), material);
+    }
+    const faceGroups = [];
+    // Bottom face
+    const bottomGroup = new THREE.Group();
+    for (let x = gridCenter.x - HALF_SIZE; x <= gridCenter.x + HALF_SIZE; x += CUBE_SPACING) {
+      bottomGroup.add(createLine(
+        new THREE.Vector3(x, gridCenter.y - HALF_SIZE, BOTTOM_Z),
+        new THREE.Vector3(x, gridCenter.y + HALF_SIZE, BOTTOM_Z),
+        cubeMat
+      ));
+    }
+    for (let y = gridCenter.y - HALF_SIZE; y <= gridCenter.y + HALF_SIZE; y += CUBE_SPACING) {
+      bottomGroup.add(createLine(
+        new THREE.Vector3(gridCenter.x - HALF_SIZE, y, BOTTOM_Z),
+        new THREE.Vector3(gridCenter.x + HALF_SIZE, y, BOTTOM_Z),
+        cubeMat
+      ));
+    }
+    bottomGroup.userData.center = new THREE.Vector3(gridCenter.x, gridCenter.y, BOTTOM_Z);
+    bottomGroup.userData.normal = new THREE.Vector3(0, 0, -1);
+    scene.add(bottomGroup);
+    faceGroups.push(bottomGroup);
+    // Left face
+    const leftGroup = new THREE.Group();
+    for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+      leftGroup.add(createLine(
+        new THREE.Vector3(gridCenter.x - HALF_SIZE, gridCenter.y - HALF_SIZE, z),
+        new THREE.Vector3(gridCenter.x - HALF_SIZE, gridCenter.y + HALF_SIZE, z),
+        cubeMat
+      ));
+    }
+    for (let y = gridCenter.y - HALF_SIZE; y <= gridCenter.y + HALF_SIZE; y += CUBE_SPACING) {
+      leftGroup.add(createLine(
+        new THREE.Vector3(gridCenter.x - HALF_SIZE, y, BOTTOM_Z),
+        new THREE.Vector3(gridCenter.x - HALF_SIZE, y, 0),
+        cubeMat
+      ));
+    }
+    leftGroup.userData.center = new THREE.Vector3(gridCenter.x - HALF_SIZE, gridCenter.y, (0+BOTTOM_Z)/2);
+    leftGroup.userData.normal = new THREE.Vector3(-1, 0, 0);
+    scene.add(leftGroup);
+    faceGroups.push(leftGroup);
+    // Right face
+    const rightGroup = new THREE.Group();
+    for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+      rightGroup.add(createLine(
+        new THREE.Vector3(gridCenter.x + HALF_SIZE, gridCenter.y - HALF_SIZE, z),
+        new THREE.Vector3(gridCenter.x + HALF_SIZE, gridCenter.y + HALF_SIZE, z),
+        cubeMat
+      ));
+    }
+    for (let y = gridCenter.y - HALF_SIZE; y <= gridCenter.y + HALF_SIZE; y += CUBE_SPACING) {
+      rightGroup.add(createLine(
+        new THREE.Vector3(gridCenter.x + HALF_SIZE, y, BOTTOM_Z),
+        new THREE.Vector3(gridCenter.x + HALF_SIZE, y, 0),
+        cubeMat
+      ));
+    }
+    rightGroup.userData.center = new THREE.Vector3(gridCenter.x + HALF_SIZE, gridCenter.y, (0+BOTTOM_Z)/2);
+    rightGroup.userData.normal = new THREE.Vector3(1, 0, 0);
+    scene.add(rightGroup);
+    faceGroups.push(rightGroup);
+    // Front face
+    const frontGroup = new THREE.Group();
+    for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+      frontGroup.add(createLine(
+        new THREE.Vector3(gridCenter.x - HALF_SIZE, gridCenter.y + HALF_SIZE, z),
+        new THREE.Vector3(gridCenter.x + HALF_SIZE, gridCenter.y + HALF_SIZE, z),
+        cubeMat
+      ));
+    }
+    for (let x = gridCenter.x - HALF_SIZE; x <= gridCenter.x + HALF_SIZE; x += CUBE_SPACING) {
+      frontGroup.add(createLine(
+        new THREE.Vector3(x, gridCenter.y + HALF_SIZE, BOTTOM_Z),
+        new THREE.Vector3(x, gridCenter.y + HALF_SIZE, 0),
+        cubeMat
+      ));
+    }
+    frontGroup.userData.center = new THREE.Vector3(gridCenter.x, gridCenter.y + HALF_SIZE, (0+BOTTOM_Z)/2);
+    frontGroup.userData.normal = new THREE.Vector3(0, 1, 0);
+    scene.add(frontGroup);
+    faceGroups.push(frontGroup);
+    // Back face
+    const backGroup = new THREE.Group();
+    for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+      backGroup.add(createLine(
+        new THREE.Vector3(gridCenter.x - HALF_SIZE, gridCenter.y - HALF_SIZE, z),
+        new THREE.Vector3(gridCenter.x + HALF_SIZE, gridCenter.y - HALF_SIZE, z),
+        cubeMat
+      ));
+    }
+    for (let x = gridCenter.x - HALF_SIZE; x <= gridCenter.x + HALF_SIZE; x += CUBE_SPACING) {
+      backGroup.add(createLine(
+        new THREE.Vector3(x, gridCenter.y - HALF_SIZE, BOTTOM_Z),
+        new THREE.Vector3(x, gridCenter.y - HALF_SIZE, 0),
+        cubeMat
+      ));
+    }
+    backGroup.userData.center = new THREE.Vector3(gridCenter.x, gridCenter.y - HALF_SIZE, (0+BOTTOM_Z)/2);
+    backGroup.userData.normal = new THREE.Vector3(0, -1, 0);
+    scene.add(backGroup);
+    faceGroups.push(backGroup);
+
+    function updateFaceVisibility() {
+      faceGroups.forEach(face => {
+        const center = face.userData.center;
+        const normal = face.userData.normal;
+        const v = new THREE.Vector3().subVectors(camera.position, center);
+        face.visible = (v.dot(normal) <= 0);
+      });
+    }
+    updateFaceVisibility();
+
+    // -------------------- 3) ANIMAZIONE DEI TERREMOTI --------------------
+    function parseCSV(text) {
+      const lines = text.split(/\r?\n/);
+      const data = [];
+      for (let i = 1; i < lines.length; i++) {
+        if (!lines[i].trim()) continue;
+        const parts = lines[i].split(',');
+        if (parts.length < 5) continue;
+        const x = parseFloat(parts[0]);
+        const y = parseFloat(parts[1]);
+        const z = parseFloat(parts[2]);
+        const md = parseFloat(parts[3]);
+        const timeStr = parts[4].trim().substring(0, 19);
+        const time = new Date(timeStr);
+        data.push({ x, y, z, md, time });
+      }
+      return data;
+    }
+
+    function filterDataByDate() {
+      if (!originalData.length) return [];
+      let start = new Date(startDateInput.value);
+      let end = new Date(endDateInput.value);
+      if (startDateInput.value === endDateInput.value) {
+        start.setHours(0,0,0,0);
+        end.setHours(23,59,59,0);
+      }
+      return originalData.filter(d => d.time >= start && d.time <= end);
+    }
+
+    function createEarthquakeSpheres(data) {
+      quakeSpheres.forEach(s => scene.remove(s));
+      quakeSpheres = [];
+      if (data.length === 0) return;
+      let minZ = Infinity, maxZ = -Infinity;
+      data.forEach(d => {
+        if (d.z < minZ) minZ = d.z;
+        if (d.z > maxZ) maxZ = d.z;
+      });
+      data.forEach(d => {
+        const radius = Math.exp(d.md) * 3;  // raggio moltiplicato * 3
+        const geometry = new THREE.SphereGeometry(radius, 16, 16);
+        const color = getColorForDepth(d.z, minZ, maxZ);
+
+        const material = new THREE.MeshPhysicalMaterial({
+          color: color,
+          metalness: 0.2,
+          roughness: 0.1,
+          clearcoat: 1.0,
+          clearcoatRoughness: 0.1,
+          transparent: false,
+          opacity: 1
+        });
+
+        const sphere = new THREE.Mesh(geometry, material);
+        sphere.castShadow = true;      // La sfera proietta un'ombra
+        sphere.receiveShadow = true;   // La sfera riceve l'ombra da altri oggetti
+        sphere.position.set(d.x, d.y, d.z);
+        sphere.visible = false;
+        sphere.userData.quakeTime = d.time;
+        sphere.userData.md = d.md;
+        scene.add(sphere);
+        quakeSpheres.push(sphere);
+      });
+    }
+
+    function getColorForDepth(z, minZ, maxZ) {
+      let normalized = (maxZ - z) / (maxZ - minZ);
+      normalized = Math.max(0, Math.min(1, normalized));
+      const hue = normalized * 270;
+      return new THREE.Color(`hsl(${hue}, 100%, 50%)`);
+    }
+
+    // Funzione per aggiornare le etichette dello slider temporale
+    function updateTimeSliderLabels() {
+      const dataList = document.getElementById('timeTicks');
+      if(dataList){
+        dataList.innerHTML = `
+          <option value="0" label="${startDateInput.value}"></option>
+          <option value="100" label="${endDateInput.value}"></option>
+        `;
+      }
+    }
+
+// Funzione statistiche
+
+function updateStatistics() {
+  // Calcola i dati filtrati in base alle date selezionate
+  const filtered = filterDataByDate();
+  // Crea i bins per le bande di magnitudo per i dati filtrati
+  const bins = [0, 0, 0, 0, 0]; // [MD>=0,<1], [MD>=1,<2], ..., [MD>=4,<5]
+  filtered.forEach(d => {
+    const md = d.md;
+    if (md >= 0 && md < 1) bins[0]++;
+    else if (md >= 1 && md < 2) bins[1]++;
+    else if (md >= 2 && md < 3) bins[2]++;
+    else if (md >= 3 && md < 4) bins[3]++;
+    else if (md >= 4 && md < 5) bins[4]++;
+  });
+  
+  // Il numero totale di terremoti si basa su tutti i dati (originalData)
+  const total = originalData.length;
+  
+  // Prepara il contenuto HTML per le statistiche:
+  const html = `
+    <div><strong>Statistiche (date selezionate):</strong></div>
+    <div>MD ≥ 0 e MD < 1: ${bins[0]}</div>
+    <div>MD ≥ 1 e MD < 2: ${bins[1]}</div>
+    <div>MD ≥ 2 e MD < 3: ${bins[2]}</div>
+    <div>MD ≥ 3 e MD < 4: ${bins[3]}</div>
+    <div>MD ≥ 4 e MD < 5: ${bins[4]}</div>
+    <hr>
+    <div><strong>Numero totale terremoti: ${total}</strong></div>
+  `;
+  
+  document.getElementById('statsContainer').innerHTML = html;
+}
+
+
+ 
+    csvInput.addEventListener('change', function(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const text = e.target.result;
+        originalData = parseCSV(text);
+        originalData.sort((a, b) => a.time - b.time);
+        if (originalData.length > 0) {
+          const minDate = new Date(originalData[0].time);
+          const maxDate = new Date(originalData[originalData.length - 1].time);
+          function toDateString(d) { return d.toISOString().split('T')[0]; }
+          startDateInput.value = toDateString(minDate);
+          endDateInput.value = toDateString(maxDate);
+          if (startDateInput.value === endDateInput.value) {
+            minDate.setHours(0,0,0,0);
+            maxDate.setHours(23,59,59,0);
+          }
+          animStartTime = new Date(startDateInput.value);
+          animEndTime = new Date(endDateInput.value);
+          if (startDateInput.value === endDateInput.value) {
+            animStartTime.setHours(0,0,0,0);
+            animEndTime.setHours(23,59,59,0);
+          }
+          originalStartDate = new Date(startDateInput.value);
+          originalEndDate = new Date(endDateInput.value);
+          if (startDateInput.value === endDateInput.value) {
+            originalStartDate.setHours(0,0,0,0);
+            originalEndDate.setHours(23,59,59,0);
+          }
+          earthquakeData = filterDataByDate();
+          createEarthquakeSpheres(earthquakeData);
+          animationProgress = 0;
+          quakeSpheres.forEach(s => s.visible = false);
+          timeSlider.value = 0;
+          updateTimeSliderLabels();
+// Aggiorna le statistiche (qui vengono calcolate su tutti i dati)
+      updateStatistics();
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    startDateInput.addEventListener('change', function() {
+      earthquakeData = filterDataByDate();
+      createEarthquakeSpheres(earthquakeData);
+      animationProgress = 0;
+      quakeSpheres.forEach(s => s.visible = false);
+      animStartTime = new Date(this.value);
+      if (this.value === endDateInput.value) {
+        animStartTime.setHours(0,0,0,0);
+        animEndTime = new Date(this.value);
+        animEndTime.setHours(23,59,59,0);
+      }
+      timeSlider.value = 0;
+      updateTimeSliderLabels();
+      updateStatistics();  // Aggiorna statistiche in base alle date selezionate
+    });
+
+    endDateInput.addEventListener('change', function() {
+      earthquakeData = filterDataByDate();
+      createEarthquakeSpheres(earthquakeData);
+      animationProgress = 0;
+      quakeSpheres.forEach(s => s.visible = false);
+      animEndTime = new Date(this.value);
+      if (this.value === startDateInput.value) {
+        animStartTime = new Date(this.value);
+        animStartTime.setHours(0,0,0,0);
+        animEndTime.setHours(23,59,59,0);
+      }
+      timeSlider.value = 0;
+      updateTimeSliderLabels();
+      updateStatistics();  // Aggiorna statistiche in base alle date selezionate
+    });
+
+    opacitySlider.addEventListener('input', function() {
+      const val = parseInt(this.value, 10);
+      opacityLabel.textContent = val + "%";
+      if (mapPlaneGlobal && mapPlaneGlobal.material) {
+        mapPlaneGlobal.material.opacity = val / 100;
+        mapPlaneGlobal.material.transparent = true;
+      }
+    });
+
+    timeSlider.addEventListener('input', function() {
+      animationProgress = (parseInt(this.value, 10) / 100) * TOTAL_ANIM_DURATION;
+      updateAnimation();
+    });
+
+    playButton.addEventListener('click', function() {
+      if (!animationPlaying) {
+        animationPlaying = true;
+        animationStartReal = performance.now() - animationProgress * 1000;
+      }
+    });
+
+    pauseButton.addEventListener('click', function() {
+      animationPlaying = false;
+    });
+
+    resetButton.addEventListener('click', function() {
+      animationPlaying = false;
+      animationProgress = 0;
+      timeSlider.value = 0;
+      if (originalStartDate && originalEndDate) {
+        startDateInput.value = originalStartDate.toISOString().split('T')[0];
+        endDateInput.value = originalEndDate.toISOString().split('T')[0];
+        animStartTime = new Date(originalStartDate);
+        animEndTime = new Date(originalEndDate);
+      }
+      earthquakeData = filterDataByDate();
+      createEarthquakeSpheres(earthquakeData);
+      quakeSpheres.forEach(s => s.visible = false);
+      updateTimeSliderLabels();
+      updateStatistics();  // Aggiorna statistiche in base alle date selezionate
+    });
+
+    function updateAnimation() {
+          if (!animStartTime || !animEndTime || earthquakeData.length === 0) return;
+          const realSpan = animEndTime - animStartTime;
+          if (animationPlaying) {
+            const now = performance.now();
+            animationProgress = (now - animationStartReal) / 1000;
+            if (animationProgress > TOTAL_ANIM_DURATION) {
+              animationProgress = TOTAL_ANIM_DURATION;
+              animationPlaying = false;
+            }
+            timeSlider.value = (animationProgress / TOTAL_ANIM_DURATION) * 100;
+          }
+          const thresholdTime = new Date(animStartTime.getTime() + (realSpan * (animationProgress / TOTAL_ANIM_DURATION)));
+          quakeSpheres.forEach(sphere => {
+            sphere.visible = (sphere.userData.quakeTime <= thresholdTime);
+          });
+          const currentFrame = Math.floor((animationProgress / TOTAL_ANIM_DURATION) * 60) + 1;
+          frameIndicator.innerText = `Frame: ${currentFrame}/60`;
+        }
+   
+            // -------------------- GESTIONE TOOLTIP --------------------
+
+        // Vertex shader: trasmette le coordinate UV al fragment shader.
+        const fireVertexShader = `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `;
+
+        // Fragment shader: crea un effetto fuoco animato usando il tempo.
+        const fireFragmentShader = `
+          uniform float time;
+          varying vec2 vUv;
+
+          // Funzione semplice per "distorsione" dell'uv, puoi usare una funzione noise più sofisticata se disponibile.
+          float firePattern(vec2 uv, float t) {
+            float value = sin(uv.y * 10.0 + t * 5.0) * 0.5 + 0.5;
+            return value;
+          }
+
+          void main() {
+            vec2 uv = vUv;
+            float intensity = firePattern(uv, time);
+            // Colori dal rosso/arancione al giallo (effetto fuoco)
+            vec3 fireColor = mix(vec3(1.0, 0.3, 0.0), vec3(1.0, 1.0, 0.0), intensity);
+            gl_FragColor = vec4(fireColor, 1.0);
+          }
+        `;
+
+        // Funzione per attivare l'effetto fuoco su una sfera selezionata
+        function activateFireEffect(sphere) {
+          // Crea un nuovo ShaderMaterial con le uniform necessarie.
+          const fireMaterial = new THREE.ShaderMaterial({
+            vertexShader: fireVertexShader,
+            fragmentShader: fireFragmentShader,
+            uniforms: {
+              time: { value: 0.0 }
+            },
+            transparent: true,
+            blending: THREE.AdditiveBlending
+          });
+          
+          // Salva il materiale originale per poterlo ripristinare dopo (opzionale)
+          sphere.userData.originalMaterial = sphere.material;
+          
+          // Applica il materiale fuoco alla sfera
+          sphere.material = fireMaterial;
+          
+          // Aggiorna il parametro "time" in un ciclo di animazione per animare l'effetto
+          const clock = new THREE.Clock();
+          function updateFire() {
+            // Se la sfera è ancora selezionata, aggiorna il tempo
+            if (sphere.material === fireMaterial) {
+              fireMaterial.uniforms.time.value = clock.getElapsedTime();
+              requestAnimationFrame(updateFire);
+            }
+          }
+          updateFire();
+          
+          // Per esempio, dopo 5 secondi ripristina il materiale originale
+          setTimeout(() => {
+            sphere.material = sphere.userData.originalMaterial;
+          }, 5000);
+        }
+
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+        function onClick(event) {
+          const rect = renderer.domElement.getBoundingClientRect();
+          mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+          mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+          raycaster.setFromCamera(mouse, camera);
+          const intersects = raycaster.intersectObjects(quakeSpheres);
+          // Debug: console.log(intersects);
+          if (intersects.length > 0) {
+            const sphere = intersects[0].object;
+            activateFireEffect(sphere);
+            showTooltip(event.clientX, event.clientY, sphere);
+          }
+        }
+        renderer.domElement.addEventListener('click', onClick);
+        window.closeTooltip = function() {
+          tooltip.style.display = "none";
+        };
+        function showTooltip(x, y, sphere) {
+          const dt = sphere.userData.quakeTime;
+          const formattedDate = ("0" + dt.getDate()).slice(-2) + "/" +
+                                ("0" + (dt.getMonth()+1)).slice(-2) + "/" +
+                                dt.getFullYear() + " - " +
+                                ("0" + dt.getHours()).slice(-2) + ":" +
+                                ("0" + dt.getMinutes()).slice(-2) + ":" +
+                                ("0" + dt.getSeconds()).slice(-2);
+          tooltip.innerHTML = '<span class="close" onclick="closeTooltip()">X</span>' +
+                              `<strong>${formattedDate}</strong><br>` +
+                              `MD: ${sphere.userData.md}<br>` +
+                              `Profondità: ${sphere.position.z} m`;
+          tooltip.style.left = x + "px";
+          tooltip.style.top = y + "px";
+          tooltip.style.display = "block";
+        }
+        window.addEventListener('keydown', function(event) {
+          if (event.key === "Escape") {
+            tooltip.style.display = "none";
+          }
+        });
+
+        // --------------------  MAPPA OSM sulla faccia superiore --------------------
+        let mapPlaneGlobal = null;
+        let currentZoomGlobal = MAP_ZOOM;
+        function updateMapTextureGlobal(zoomLevel) {
+          const half = HALF_SIZE;
+          const utmNW = [ gridCenter.x - half, gridCenter.y + half ];
+          const utmNE = [ gridCenter.x + half, gridCenter.y + half ];
+          const utmSE = [ gridCenter.x + half, gridCenter.y - half ];
+          const utmSW = [ gridCenter.x - half, gridCenter.y - half ];
+          const llNW = proj4('+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs', 'EPSG:4326', utmNW);
+          const llNE = proj4('+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs', 'EPSG:4326', utmNE);
+          const llSE = proj4('+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs', 'EPSG:4326', utmSE);
+          const llSW = proj4('+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs', 'EPSG:4326', utmSW);
+          const minLon = Math.min(llNW[0], llNE[0], llSE[0], llSW[0]);
+          const maxLon = Math.max(llNW[0], llNE[0], llSE[0], llSW[0]);
+          const minLat = Math.min(llNW[1], llNE[1], llSE[1], llSW[1]);
+          const maxLat = Math.max(llNW[1], llNE[1], llSE[1], llSW[1]);
+          function long2tile(lon, zoom) {
+            return Math.floor((lon + 180) / 360 * Math.pow(2, zoom));
+          }
+          function lat2tile(lat, zoom) {
+            const rad = lat * Math.PI/180;
+            return Math.floor((1 - Math.log(Math.tan(rad) + 1/Math.cos(rad)) / Math.PI) / 2 * Math.pow(2, zoom));
+          }
+          const tileXMin = long2tile(minLon, zoomLevel);
+          const tileXMax = long2tile(maxLon, zoomLevel);
+          const tileYMin = lat2tile(maxLat, zoomLevel);
+          const tileYMax = lat2tile(minLat, zoomLevel);
+          const tilesX = tileXMax - tileXMin + 1;
+          const tilesY = tileYMax - tileYMin + 1;
+          const canvasWidth = tilesX * 256;
+          const canvasHeight = tilesY * 256;
+          const canvas = document.createElement('canvas');
+          canvas.width = canvasWidth;
+          canvas.height = canvasHeight;
+          const ctx = canvas.getContext('2d');
+          const promises = [];
+          for (let x = tileXMin; x <= tileXMax; x++) {
+            for (let y = tileYMin; y <= tileYMax; y++) {
+              const url = `https://tile.openstreetmap.org/${zoomLevel}/${x}/${y}.png`;
+              const p = new Promise((resolve, reject) => {
+                const img = new Image();
+                img.crossOrigin = 'anonymous';
+                img.onload = () => {
+                  const posX = (x - tileXMin) * 256;
+                  const posY = (y - tileYMin) * 256;
+                  ctx.drawImage(img, posX, posY, 256, 256);
+                  resolve();
+                };
+                img.onerror = () => { reject(`Errore nel caricamento di ${url}`); };
+                img.src = url;
+              });
+              promises.push(p);
+            }
+          }
+          return Promise.all(promises).then(() => {
+            const texture = new THREE.CanvasTexture(canvas);
+            texture.needsUpdate = true;
+            texture.flipY = true;
+            return texture;
+          });
+        }
+
+        const planeGeometry = new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE);
+        const planeMaterial = new THREE.MeshBasicMaterial({ color: 0xffffff, opacity: 1, transparent: true });
+        mapPlaneGlobal = new THREE.Mesh(planeGeometry, planeMaterial);
+        mapPlaneGlobal.position.copy(gridCenter);
+        scene.add(mapPlaneGlobal);
+
+        function loadMapTextureGlobal(zoomLevel) {
+          updateMapTextureGlobal(zoomLevel).then(texture => {
+            mapPlaneGlobal.material.map = texture;
+            mapPlaneGlobal.material.needsUpdate = true;
+          }).catch(err => {
+            console.error(err);
+          });
+        }
+        loadMapTextureGlobal(currentZoomGlobal = MAP_ZOOM);
+
+        // -------------------- LOOP DI ANIMAZIONE --------------------
+        function animate() {
+          requestAnimationFrame(animate);
+          controls.update();
+          updateFaceVisibility();
+          updateAnimation();
+          renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+          camera.aspect = window.innerWidth/window.innerHeight;
+          camera.updateProjectionMatrix();
+          renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+      </script>
+</body>
+</html>
+
