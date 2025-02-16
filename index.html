@@ -1,0 +1,1103 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <title>TCube - Animazione terremoti 3D - Campi Flegrei (EPSG:32633N)</title>
+    <!-- Import map per Three.js (versione 0.173.0) -->
+    <script type="importmap">
+      {
+        "imports": {
+          "three": "https://cdn.jsdelivr.net/npm/three@0.173.0/build/three.module.js"
+        }
+      }
+    </script>
+    <style>
+      /* Sfondo con gradiente: grigio chiaro in basso, grigio scuro in alto */
+      body {
+        margin: 0;
+        overflow: hidden;
+        background: linear-gradient(to top, #cccccc, #333333);
+      }
+      canvas {
+        display: block;
+      }
+      /* Pannello UI laterale: spostato verso il basso (top: 12%) */
+      #uiContainer {
+        position: absolute;
+        top: 12%;
+        left: 10px;
+        background: rgba(255, 255, 255, 0.8);
+        padding: 10px;
+        border-radius: 8px;
+        font-family: sans-serif;
+        z-index: 20;
+      }
+      #uiContainer input,
+      #uiContainer button {
+        margin: 5px 0;
+        display: block;
+      }
+      /* Slider temporale: posizionato in alto, centrato, e con larghezza 80% */
+      #timeSliderContainer {
+        position: absolute;
+        top: 4%;
+        left: 10%;
+        width: 80%;
+        z-index: 30;
+      }
+      /* Il div che segue il pallino dello slider */
+      #timeLabel {
+        position: absolute;
+        top: -30px;
+        left: 0;
+        color: white;
+        background: rgba(0, 0, 0, 0.5);
+        padding: 2px 5px;
+        border-radius: 3px;
+        pointer-events: none;
+        font-family: sans-serif;
+        font-size: 14px;
+        white-space: nowrap;
+      }
+      #timeSlider {
+        width: 100%;
+        /* Rimuovo eventuali padding predefiniti */
+        margin: 0;
+      }
+      /* Stili per la traccia (track) dello slider: spessore ridotto */
+      input[type=range]::-webkit-slider-runnable-track {
+        height: 4px;
+        background: #ccc;
+      }
+      input[type=range]::-moz-range-track {
+        height: 4px;
+        background: #ccc;
+      }
+      /* Stili per il thumb: riportato al valore precedente (20px) */
+      input[type=range]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        appearance: none;
+        background: blue;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        cursor: pointer;
+        margin-top: -8px; /* per centrare verticalmente sul track */
+      }
+      input[type=range]::-moz-range-thumb {
+        background: blue;
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        cursor: pointer;
+      }
+      #timeSliderContainer datalist {
+        display: flex;
+        justify-content: space-between;
+      }
+      /* Indicatore dei frame */
+      #frameIndicator {
+        margin-top: 5px;
+        text-align: center;
+        font-weight: bold;
+      }
+      /* Tooltip styling */
+      #tooltip {
+        position: absolute;
+        background: rgba(255, 255, 255, 0.9);
+        border: 1px solid #333;
+        padding: 14px;
+        border-radius: 4px;
+        font-family: sans-serif;
+        z-index: 40;
+        pointer-events: auto;
+      }
+      #tooltip .close {
+        position: absolute;
+        top: 1px;
+        right: 1px;
+        cursor: pointer;
+        font-weight: bold;
+      }
+      /* Statistiche */
+      #statsContainer {
+        position: absolute;
+        top: 12%;
+        right: 10px;
+        background: rgba(255, 255, 255, 0.8);
+        padding: 10px;
+        border-radius: 8px;
+        font-family: sans-serif;
+        z-index: 20;
+      }
+    </style>
+  </head>
+  <body>
+    <!-- Pannello UI laterale -->
+    <div id="uiContainer">
+      <label>Opacità mappa: <span id="opacityLabel">100%</span></label>
+      <input type="range" id="opacitySlider" min="0" max="100" value="100" />
+      <label>Carica CSV (terremoti):</label>
+      <input type="file" id="csvInput" accept=".csv" />
+      <label>Data inizio:</label>
+      <input type="date" id="startDate" />
+      <label>Data fine:</label>
+      <input type="date" id="endDate" />
+      <button id="playButton">PLAY</button>
+      <button id="pauseButton">PAUSE</button>
+      <button id="resetButton">RESET</button>
+      <div id="frameIndicator">Frame: 0/60</div>
+    </div>
+    <!-- Slider temporale -->
+    <div id="timeSliderContainer">
+      <!-- Etichetta dinamica che segue il pallino -->
+      <div id="timeLabel"></div>
+      <input type="range" id="timeSlider" min="0" max="100" value="0" list="timeTicks" />
+      <datalist id="timeTicks">
+        <!-- Tacchette verranno impostate dinamicamente -->
+      </datalist>
+    </div>
+    <!-- Tooltip -->
+    <div id="tooltip" style="display: none;"></div>
+    <!-- Statistiche -->
+    <div id="statsContainer"></div>
+
+    <script type="module">
+      import * as THREE from "three";
+      import { OrbitControls } from "https://cdn.jsdelivr.net/npm/three@0.173.0/examples/jsm/controls/OrbitControls.js";
+      import proj4 from "https://cdn.skypack.dev/proj4";
+
+      // -------------------- COSTANTI GLOBALI --------------------
+      const GRID_SIZE = 10000;
+      const HALF_SIZE = 5000;
+      const BOTTOM_Z = -10000;
+      const CUBE_SPACING = 1000;
+      const TOTAL_ANIM_DURATION = 60; // in secondi
+      const MAP_ZOOM = 15;
+
+      // -------------------- VARIABILI PER DATI & ANIMAZIONE --------------------
+      let originalData = [];
+      let earthquakeData = [];
+      let quakeSpheres = [];
+      let animStartTime = null;
+      let animEndTime = null;
+      let animationProgress = 0;
+      let animationPlaying = false;
+      let animationStartReal = null;
+      let originalStartDate = null;
+      let originalEndDate = null;
+      let prevSliderValue = 0;
+
+      // -------------------- SCENA, CAMERA, RENDERER --------------------
+      const scene = new THREE.Scene();
+      scene.up.set(0, 0, 1);
+      const gridCenter = new THREE.Vector3(425300, 4519000, 0);
+      const camera = new THREE.PerspectiveCamera(
+        55,
+        window.innerWidth / window.innerHeight,
+        1,
+        30000
+      );
+      camera.position.set(
+        gridCenter.x + 10000,
+        gridCenter.y - 10000,
+        10000
+      );
+      camera.up.set(0, 0, 1);
+      camera.lookAt(gridCenter);
+      const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+      renderer.shadowMap.enabled = true;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      renderer.setClearColor(0x000000, 0);
+      document.body.appendChild(renderer.domElement);
+      const controls = new OrbitControls(camera, renderer.domElement);
+      controls.target.copy(gridCenter);
+      controls.update();
+
+      // -------------------- LUCI & OMBRA --------------------
+      const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+      scene.add(ambientLight);
+      const directionalLight = new THREE.DirectionalLight(0xffffff, 3);
+      directionalLight.position.set(15000, 15000, 15000);
+      directionalLight.castShadow = true;
+      directionalLight.shadow.mapSize.width = 4096;
+      directionalLight.shadow.mapSize.height = 4096;
+      directionalLight.shadow.camera.left = -15000;
+      directionalLight.shadow.camera.right = 15000;
+      directionalLight.shadow.camera.top = 15000;
+      directionalLight.shadow.camera.bottom = -15000;
+      directionalLight.shadow.camera.near = 1;
+      directionalLight.shadow.camera.far = 30000;
+      scene.add(directionalLight);
+
+      // -------------------- UI ELEMENTS --------------------
+      const opacitySlider = document.getElementById("opacitySlider");
+      const opacityLabel = document.getElementById("opacityLabel");
+      const csvInput = document.getElementById("csvInput");
+      const startDateInput = document.getElementById("startDate");
+      const endDateInput = document.getElementById("endDate");
+      const playButton = document.getElementById("playButton");
+      const pauseButton = document.getElementById("pauseButton");
+      const resetButton = document.getElementById("resetButton");
+      const timeSlider = document.getElementById("timeSlider");
+      const timeLabel = document.getElementById("timeLabel");
+      const frameIndicator = document.getElementById("frameIndicator");
+      const tooltip = document.getElementById("tooltip");
+      const statsContainer = document.getElementById("statsContainer");
+
+      // Event listener per lo slider di opacità: aggiorna mappa OSM e cerchi
+      opacitySlider.addEventListener("input", function() {
+        opacityLabel.innerText = this.value + "%";
+        if (mapPlaneGlobal) {
+          mapPlaneGlobal.material.opacity = this.value / 100;
+          mapPlaneGlobal.material.needsUpdate = true;
+        }
+        updateMapCircles();
+      });
+
+      // -------------------- FUNZIONE makeTextSprite --------------------
+      function makeTextSprite(message, parameters) {
+        parameters = parameters || {};
+        const fontface = parameters.fontface || "Arial";
+        const fontsize = parameters.fontsize || 24;
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        context.font = fontsize + "px " + fontface;
+        const metrics = context.measureText(message);
+        const textWidth = metrics.width;
+        canvas.width = textWidth;
+        canvas.height = fontsize * 1.2;
+        context.font = fontsize + "px " + fontface;
+        context.fillStyle = parameters.fillStyle || "rgba(255,255,255,1.0)";
+        context.fillText(message, 0, fontsize);
+        const texture = new THREE.CanvasTexture(canvas);
+        texture.needsUpdate = true;
+        const spriteMaterial = new THREE.SpriteMaterial({ map: texture, transparent: true });
+        const sprite = new THREE.Sprite(spriteMaterial);
+        sprite.scale.set(canvas.width, canvas.height, 1.0);
+        return sprite;
+      }
+
+      // -------------------- ASSI E GRIGLIE DEL CUBO --------------------
+      const zAxisMaterial = new THREE.LineBasicMaterial({ color: 0x000000 });
+      const zAxisGeom = new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(gridCenter.x, gridCenter.y, 0),
+        new THREE.Vector3(gridCenter.x, gridCenter.y, BOTTOM_Z)
+      ]);
+      const zAxis = new THREE.Line(zAxisGeom, zAxisMaterial);
+      scene.add(zAxis);
+      for (let z = -100; z >= BOTTOM_Z; z -= 100) {
+        const tickGeom = new THREE.BufferGeometry().setFromPoints([
+          new THREE.Vector3(gridCenter.x, gridCenter.y, z),
+          new THREE.Vector3(gridCenter.x + 20, gridCenter.y, z)
+        ]);
+        const tick = new THREE.Line(tickGeom, zAxisMaterial);
+        scene.add(tick);
+        if (z % 1000 === 0) {
+          const label = makeTextSprite(z + " m", { fontsize: 32, fillStyle: "blue" });
+          label.position.set(gridCenter.x + 50, gridCenter.y, z);
+          scene.add(label);
+        }
+      }
+      const axesHelper = new THREE.AxesHelper(5000);
+      axesHelper.position.copy(gridCenter);
+      // Imposta renderOrder per garantire che gli assi vengano disegnati sopra
+      axesHelper.renderOrder = 1;
+      scene.add(axesHelper);
+      const xLabel = makeTextSprite("X", { fontsize: 48, fillStyle: "red" });
+      xLabel.position.set(gridCenter.x + 5000 + 200, gridCenter.y, 0);
+      scene.add(xLabel);
+      const yLabel = makeTextSprite("Y", { fontsize: 48, fillStyle: "green" });
+      yLabel.position.set(gridCenter.x, gridCenter.y + 5000 + 200, 0);
+      scene.add(yLabel);
+      const zLabel = makeTextSprite("Z", { fontsize: 48, fillStyle: "blue" });
+      zLabel.position.set(gridCenter.x, gridCenter.y, 200);
+      scene.add(zLabel);
+
+      // -------------------- CUBO --------------------
+      const cubeMat = new THREE.LineBasicMaterial({ color: 0x000000 });
+      function createLine(start, end, material) {
+        return new THREE.Line(
+          new THREE.BufferGeometry().setFromPoints([start, end]),
+          material
+        );
+      }
+      const faceGroups = [];
+      // Bottom face
+      const bottomGroup = new THREE.Group();
+      for (
+        let x = gridCenter.x - HALF_SIZE;
+        x <= gridCenter.x + HALF_SIZE;
+        x += CUBE_SPACING
+      ) {
+        bottomGroup.add(
+          createLine(
+            new THREE.Vector3(x, gridCenter.y - HALF_SIZE, BOTTOM_Z),
+            new THREE.Vector3(x, gridCenter.y + HALF_SIZE, BOTTOM_Z),
+            cubeMat
+          )
+        );
+      }
+      for (
+        let y = gridCenter.y - HALF_SIZE;
+        y <= gridCenter.y + HALF_SIZE;
+        y += CUBE_SPACING
+      ) {
+        bottomGroup.add(
+          createLine(
+            new THREE.Vector3(gridCenter.x - HALF_SIZE, y, BOTTOM_Z),
+            new THREE.Vector3(gridCenter.x + HALF_SIZE, y, BOTTOM_Z),
+            cubeMat
+          )
+        );
+      }
+      bottomGroup.userData.center = new THREE.Vector3(
+        gridCenter.x,
+        gridCenter.y,
+        BOTTOM_Z
+      );
+      bottomGroup.userData.normal = new THREE.Vector3(0, 0, -1);
+      scene.add(bottomGroup);
+      faceGroups.push(bottomGroup);
+      // Left face
+      const leftGroup = new THREE.Group();
+      for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+        leftGroup.add(
+          createLine(
+            new THREE.Vector3(
+              gridCenter.x - HALF_SIZE,
+              gridCenter.y - HALF_SIZE,
+              z
+            ),
+            new THREE.Vector3(
+              gridCenter.x - HALF_SIZE,
+              gridCenter.y + HALF_SIZE,
+              z
+            ),
+            cubeMat
+          )
+        );
+      }
+      for (
+        let y = gridCenter.y - HALF_SIZE;
+        y <= gridCenter.y + HALF_SIZE;
+        y += CUBE_SPACING
+      ) {
+        leftGroup.add(
+          createLine(
+            new THREE.Vector3(gridCenter.x - HALF_SIZE, y, BOTTOM_Z),
+            new THREE.Vector3(gridCenter.x - HALF_SIZE, y, 0),
+            cubeMat
+          )
+        );
+      }
+      leftGroup.userData.center = new THREE.Vector3(
+        gridCenter.x - HALF_SIZE,
+        gridCenter.y,
+        (0 + BOTTOM_Z) / 2
+      );
+      leftGroup.userData.normal = new THREE.Vector3(-1, 0, 0);
+      scene.add(leftGroup);
+      faceGroups.push(leftGroup);
+      // Right face
+      const rightGroup = new THREE.Group();
+      for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+        rightGroup.add(
+          createLine(
+            new THREE.Vector3(
+              gridCenter.x + HALF_SIZE,
+              gridCenter.y - HALF_SIZE,
+              z
+            ),
+            new THREE.Vector3(
+              gridCenter.x + HALF_SIZE,
+              gridCenter.y + HALF_SIZE,
+              z
+            ),
+            cubeMat
+          )
+        );
+      }
+      for (
+        let y = gridCenter.y - HALF_SIZE;
+        y <= gridCenter.y + HALF_SIZE;
+        y += CUBE_SPACING
+      ) {
+        rightGroup.add(
+          createLine(
+            new THREE.Vector3(gridCenter.x + HALF_SIZE, y, BOTTOM_Z),
+            new THREE.Vector3(gridCenter.x + HALF_SIZE, y, 0),
+            cubeMat
+          )
+        );
+      }
+      rightGroup.userData.center = new THREE.Vector3(
+        gridCenter.x + HALF_SIZE,
+        gridCenter.y,
+        (0 + BOTTOM_Z) / 2
+      );
+      rightGroup.userData.normal = new THREE.Vector3(1, 0, 0);
+      scene.add(rightGroup);
+      faceGroups.push(rightGroup);
+      // Front face
+      const frontGroup = new THREE.Group();
+      for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+        frontGroup.add(
+          createLine(
+            new THREE.Vector3(
+              gridCenter.x - HALF_SIZE,
+              gridCenter.y + HALF_SIZE,
+              z
+            ),
+            new THREE.Vector3(
+              gridCenter.x + HALF_SIZE,
+              gridCenter.y + HALF_SIZE,
+              z
+            ),
+            cubeMat
+          )
+        );
+      }
+      for (
+        let x = gridCenter.x - HALF_SIZE;
+        x <= gridCenter.x + HALF_SIZE;
+        x += CUBE_SPACING
+      ) {
+        frontGroup.add(
+          createLine(
+            new THREE.Vector3(x, gridCenter.y + HALF_SIZE, BOTTOM_Z),
+            new THREE.Vector3(x, gridCenter.y + HALF_SIZE, 0),
+            cubeMat
+          )
+        );
+      }
+      frontGroup.userData.center = new THREE.Vector3(
+        gridCenter.x,
+        gridCenter.y + HALF_SIZE,
+        (0 + BOTTOM_Z) / 2
+      );
+      frontGroup.userData.normal = new THREE.Vector3(0, 1, 0);
+      scene.add(frontGroup);
+      faceGroups.push(frontGroup);
+      // Back face
+      const backGroup = new THREE.Group();
+      for (let z = BOTTOM_Z; z <= 0; z += CUBE_SPACING) {
+        backGroup.add(
+          createLine(
+            new THREE.Vector3(
+              gridCenter.x - HALF_SIZE,
+              gridCenter.y - HALF_SIZE,
+              z
+            ),
+            new THREE.Vector3(
+              gridCenter.x + HALF_SIZE,
+              gridCenter.y - HALF_SIZE,
+              z
+            ),
+            cubeMat
+          )
+        );
+      }
+      for (
+        let x = gridCenter.x - HALF_SIZE;
+        x <= gridCenter.x + HALF_SIZE;
+        x += CUBE_SPACING
+      ) {
+        backGroup.add(
+          createLine(
+            new THREE.Vector3(x, gridCenter.y - HALF_SIZE, BOTTOM_Z),
+            new THREE.Vector3(x, gridCenter.y - HALF_SIZE, 0),
+            cubeMat
+          )
+        );
+      }
+      backGroup.userData.center = new THREE.Vector3(
+        gridCenter.x,
+        gridCenter.y - HALF_SIZE,
+        (0 + BOTTOM_Z) / 2
+      );
+      backGroup.userData.normal = new THREE.Vector3(0, -1, 0);
+      scene.add(backGroup);
+      faceGroups.push(backGroup);
+
+      function updateFaceVisibility() {
+        faceGroups.forEach((face) => {
+          const center = face.userData.center;
+          const normal = face.userData.normal;
+          const v = new THREE.Vector3().subVectors(camera.position, center);
+          face.visible = v.dot(normal) <= 0;
+        });
+      }
+      updateFaceVisibility();
+
+      // -------------------- PARSING CSV --------------------
+      function parseCSV(text) {
+        const lines = text.split(/\r?\n/);
+        const data = [];
+        for (let i = 1; i < lines.length; i++) {
+          if (!lines[i].trim()) continue;
+          const parts = lines[i].split(",");
+          if (parts.length < 5) continue;
+          const x = parseFloat(parts[0]);
+          const y = parseFloat(parts[1]);
+          const z = parseFloat(parts[2]);
+          const md = parseFloat(parts[3]);
+          const timeStr = parts[4].trim().substring(0, 19);
+          const time = new Date(timeStr);
+          data.push({ x, y, z, md, time });
+        }
+        return data;
+      }
+      function filterDataByDate() {
+        if (!originalData.length) return [];
+        let start = new Date(startDateInput.value);
+        let end = new Date(endDateInput.value);
+        if (startDateInput.value === endDateInput.value) {
+          start.setHours(0, 0, 0, 0);
+          end.setHours(23, 59, 59, 0);
+        }
+        return originalData.filter(d => d.time >= start && d.time <= end);
+      }
+      function updateStatistics() {
+        const filtered = filterDataByDate();
+        const bins = [0, 0, 0, 0, 0];
+        filtered.forEach(d => {
+          const md = d.md;
+          if (md >= 0 && md < 1) bins[0]++;
+          else if (md >= 1 && md < 2) bins[1]++;
+          else if (md >= 2 && md < 3) bins[2]++;
+          else if (md >= 3 && md < 4) bins[3]++;
+          else if (md >= 4 && md < 5) bins[4]++;
+        });
+        const total = originalData.length;
+        statsContainer.innerHTML = `
+          <div><strong>Statistiche (date selezionate):</strong></div>
+          <div>MD ≥ 0 e MD < 1: ${bins[0]}</div>
+          <div>MD ≥ 1 e MD < 2: ${bins[1]}</div>
+          <div>MD ≥ 2 e MD < 3: ${bins[2]}</div>
+          <div>MD ≥ 3 e MD < 4: ${bins[3]}</div>
+          <div>MD ≥ 4 e MD < 5: ${bins[4]}</div>
+          <hr>
+          <div><strong>Numero totale terremoti: ${total}</strong></div>
+        `;
+      }
+
+      // -------------------- GESTIONE DEI CERCHI SULLA MAPPA --------------------
+      let mapCirclesGroup = new THREE.Group();
+      scene.add(mapCirclesGroup);
+      function lightenColor(color, factor) {
+        return new THREE.Color(
+          color.r + (1 - color.r) * factor,
+          color.g + (1 - color.g) * factor,
+          color.b + (1 - color.b) * factor
+        );
+      }
+      // Creazione dei cerchi: durata a 1000ms per MD>=3 e <4, 2000ms per MD>=4
+      function createMapCircleForSphere(sphere) {
+        const radius = sphere.userData.radius;
+        const segments = 64;
+        const points = [];
+        for (let i = 0; i <= segments; i++) {
+          const angle = (i / segments) * Math.PI * 2;
+          points.push(new THREE.Vector3(Math.cos(angle) * radius, Math.sin(angle) * radius, 0));
+        }
+        const circleGeom = new THREE.BufferGeometry().setFromPoints(points);
+        const material = new THREE.LineBasicMaterial({
+          color: sphere.userData.color,
+          transparent: true,
+          opacity: opacitySlider.value / 100,
+          linewidth: 10
+        });
+        const circle = new THREE.Line(circleGeom, material);
+        circle.position.set(sphere.position.x, sphere.position.y, gridCenter.z + 15);
+        circle.userData.creationTime = performance.now();
+        circle.userData.originalColor = sphere.userData.color.clone();
+        circle.userData.animationDuration = sphere.userData.md >= 4 ? 2000 : 1000;
+        sphere.userData.mapCircle = circle;
+        mapCirclesGroup.add(circle);
+      }
+      function updateMapCircles() {
+        const now = performance.now();
+        mapCirclesGroup.children.forEach(circle => {
+          const duration = circle.userData.animationDuration;
+          const elapsed = now - circle.userData.creationTime;
+          if (elapsed < duration) {
+            const t = elapsed / 1000;
+            const pulsation = Math.sin((2 * Math.PI * t) / 0.3);
+            const scale = 3 + 2 * pulsation;
+            circle.scale.set(scale, scale, 1);
+            const brightnessFactor = (pulsation + 1) / 2;
+            const target = lightenColor(circle.userData.originalColor, 0.3);
+            const newColor = circle.userData.originalColor.clone().lerp(target, brightnessFactor);
+            circle.material.color.copy(newColor);
+          } else {
+            circle.scale.set(1, 1, 1);
+            circle.material.color.copy(circle.userData.originalColor);
+          }
+          circle.material.opacity = opacitySlider.value / 100;
+        });
+      }
+
+      // -------------------- CREAZIONE SFERE --------------------
+      function createEarthquakeSpheres(data) {
+        quakeSpheres.forEach(s => scene.remove(s));
+        quakeSpheres = [];
+        mapCirclesGroup.clear();
+        if (data.length === 0) return;
+        let minZ = Infinity, maxZ = -Infinity;
+        data.forEach(d => {
+          if (d.z < minZ) minZ = d.z;
+          if (d.z > maxZ) maxZ = d.z;
+        });
+        data.forEach(d => {
+          const radius = Math.exp(d.md) * 3;
+          const color = getColorForDepth(d.z, minZ, maxZ);
+          const geometry = new THREE.SphereGeometry(radius, 16, 16);
+          const material = new THREE.MeshPhysicalMaterial({
+            color: color,
+            metalness: 0.2,
+            roughness: 0.1,
+            clearcoat: 1.0,
+            clearcoatRoughness: 0.1,
+            transparent: false,
+            opacity: 1
+          });
+          const sphere = new THREE.Mesh(geometry, material);
+          sphere.castShadow = true;
+          sphere.receiveShadow = true;
+          sphere.position.set(d.x, d.y, d.z);
+          sphere.visible = false;
+          sphere.userData.quakeTime = d.time;
+          sphere.userData.md = d.md;
+          sphere.userData.radius = radius;
+          sphere.userData.color = color;
+          sphere.userData.createMapCircle = d.md >= 3;
+          // Flag per l'effetto tooltip/fire
+          sphere.userData.fireEffectActive = false;
+          scene.add(sphere);
+          quakeSpheres.push(sphere);
+        });
+      }
+      function getColorForDepth(z, minZ, maxZ) {
+        let normalized = (maxZ - z) / (maxZ - minZ);
+        normalized = Math.max(0, Math.min(1, normalized));
+        const hue = normalized * 270;
+        return new THREE.Color(`hsl(${hue}, 100%, 50%)`);
+      }
+
+      // -------------------- TACCHETTE DELLO SLIDER TEMPORALE --------------------
+      function formatDate(date) {
+        const d = ("0" + date.getDate()).slice(-2);
+        const m = ("0" + (date.getMonth() + 1)).slice(-2);
+        const y = date.getFullYear();
+        return `${d}/${m}/${y}`;
+      }
+      function formatDateTime(date) {
+        const d = ("0" + date.getDate()).slice(-2);
+        const m = ("0" + (date.getMonth() + 1)).slice(-2);
+        const y = date.getFullYear();
+        const hh = ("0" + date.getHours()).slice(-2);
+        const mm = ("0" + date.getMinutes()).slice(-2);
+        const ss = ("0" + date.getSeconds()).slice(-2);
+        return `${d}/${m}/${y} - ${hh}:${mm}:${ss}`;
+      }
+      // Genera 9 tacchette (0, 12.5, 25, 37.5, 50, 62.5, 75, 87.5, 100)
+      function updateTimeSliderLabels() {
+        const dataList = document.getElementById("timeTicks");
+        if (dataList) {
+          const start = new Date(startDateInput.value);
+          const end = new Date(endDateInput.value);
+          const diff = end - start;
+          let ticksHTML = "";
+          for (let i = 0; i <= 8; i++) {
+            let percentage = (i / 8) * 100;
+            let tickDate = new Date(start.getTime() + diff * (i / 8));
+            ticksHTML += `<option value="${percentage}" label="${formatDate(tickDate)}"></option>`;
+          }
+          dataList.innerHTML = ticksHTML;
+        }
+      }
+
+      // -------------------- AGGIORNAMENTO DELL'ETICHETTA DELLO SLIDER --------------------
+      function updateTimeLabel() {
+        if (!animStartTime || !animEndTime) return;
+        const sliderVal = parseFloat(timeSlider.value);
+        const realSpan = animEndTime - animStartTime;
+        const currentTime = new Date(animStartTime.getTime() + realSpan * (sliderVal / 100));
+        const labelText = (startDateInput.value === endDateInput.value) ? formatDateTime(currentTime) : formatDate(currentTime);
+        timeLabel.innerText = labelText;
+        const sliderWidth = timeSlider.clientWidth;
+        const labelWidth = timeLabel.clientWidth;
+        const posX = (sliderVal / 100) * sliderWidth - (labelWidth / 2);
+        timeLabel.style.left = posX + "px";
+      }
+
+      // -------------------- CONVERSIONE MAPPA IN SCALA DI GRIGI --------------------
+      function convertCanvasToGrayscale(canvas) {
+        const ctx = canvas.getContext("2d");
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        for (let i = 0; i < data.length; i += 4) {
+          const avg = (data[i] + data[i + 1] + data[i + 2]) / 3;
+          data[i] = avg;
+          data[i + 1] = avg;
+          data[i + 2] = avg;
+        }
+        ctx.putImageData(imageData, 0, 0);
+      }
+
+      // -------------------- MAPPA OSM (SCALA DI GRIGI) --------------------
+      let mapPlaneGlobal = null;
+      let currentZoomGlobal = MAP_ZOOM;
+      function updateMapTextureGlobal(zoomLevel) {
+        const half = HALF_SIZE;
+        const utmNW = [gridCenter.x - half, gridCenter.y + half];
+        const utmNE = [gridCenter.x + half, gridCenter.y + half];
+        const utmSE = [gridCenter.x + half, gridCenter.y - half];
+        const utmSW = [gridCenter.x - half, gridCenter.y - half];
+        const llNW = proj4("+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs", "EPSG:4326", utmNW);
+        const llNE = proj4("+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs", "EPSG:4326", utmNE);
+        const llSE = proj4("+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs", "EPSG:4326", utmSE);
+        const llSW = proj4("+proj=utm +zone=33 +datum=WGS84 +units=m +no_defs", "EPSG:4326", utmSW);
+        const minLon = Math.min(llNW[0], llNE[0], llSE[0], llSW[0]);
+        const maxLon = Math.max(llNW[0], llNE[0], llSE[0], llSW[0]);
+        const minLat = Math.min(llNW[1], llNE[1], llSE[1], llSW[1]);
+        const maxLat = Math.max(llNW[1], llNE[1], llSE[1], llSW[1]);
+        function long2tile(lon, zoom) {
+          return Math.floor(((lon + 180) / 360) * Math.pow(2, zoom));
+        }
+        function lat2tile(lat, zoom) {
+          const rad = (lat * Math.PI) / 180;
+          return Math.floor(((1 - Math.log(Math.tan(rad) + 1 / Math.cos(rad)) / Math.PI) / 2) * Math.pow(2, zoom));
+        }
+        const tileXMin = long2tile(minLon, zoomLevel);
+        const tileXMax = long2tile(maxLon, zoomLevel);
+        const tileYMin = lat2tile(maxLat, zoomLevel);
+        const tileYMax = lat2tile(minLat, zoomLevel);
+        const tilesX = tileXMax - tileXMin + 1;
+        const tilesY = tileYMax - tileYMin + 1;
+        const canvasWidth = tilesX * 256;
+        const canvasHeight = tilesY * 256;
+        const canvas = document.createElement("canvas");
+        canvas.width = canvasWidth;
+        canvas.height = canvasHeight;
+        const ctx = canvas.getContext("2d");
+        const promises = [];
+        for (let x = tileXMin; x <= tileXMax; x++) {
+          for (let y = tileYMin; y <= tileYMax; y++) {
+            const url = `https://tile.openstreetmap.org/${zoomLevel}/${x}/${y}.png`;
+            const p = new Promise((resolve, reject) => {
+              const img = new Image();
+              img.crossOrigin = "anonymous";
+              img.onload = () => {
+                const posX = (x - tileXMin) * 256;
+                const posY = (y - tileYMin) * 256;
+                ctx.drawImage(img, posX, posY, 256, 256);
+                resolve();
+              };
+              img.onerror = () => { reject(`Errore nel caricamento di ${url}`); };
+              img.src = url;
+            });
+            promises.push(p);
+          }
+        }
+        return Promise.all(promises).then(() => {
+          convertCanvasToGrayscale(canvas);
+          const texture = new THREE.CanvasTexture(canvas);
+          texture.needsUpdate = true;
+          texture.flipY = true;
+          return texture;
+        });
+      }
+      const planeGeometry = new THREE.PlaneGeometry(GRID_SIZE, GRID_SIZE);
+      const planeMaterial = new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        opacity: opacitySlider.value / 100,
+        transparent: true,
+      });
+      mapPlaneGlobal = new THREE.Mesh(planeGeometry, planeMaterial);
+      mapPlaneGlobal.position.copy(gridCenter);
+      scene.add(mapPlaneGlobal);
+
+          mapPlaneGlobal.material.polygonOffset = true;
+          mapPlaneGlobal.material.polygonOffsetFactor = 1;
+          mapPlaneGlobal.material.polygonOffsetUnits = 1;
+
+      function loadMapTextureGlobal(zoomLevel) {
+        updateMapTextureGlobal(zoomLevel)
+          .then(texture => {
+            mapPlaneGlobal.material.map = texture;
+            mapPlaneGlobal.material.needsUpdate = true;
+          })
+          .catch(err => { console.error(err); });
+      }
+      loadMapTextureGlobal(currentZoomGlobal = MAP_ZOOM);
+
+      // -------------------- GESTIONE DELLO SLIDER TEMPORALE --------------------
+      timeSlider.addEventListener("input", function () {
+        const newValue = parseInt(this.value, 10);
+        if (newValue !== prevSliderValue) {
+          mapCirclesGroup.children.forEach(circle => {
+            circle.userData.creationTime = performance.now();
+          });
+          prevSliderValue = newValue;
+        }
+        // Nasconde il tooltip per evitare incoerenze
+        tooltip.style.display = "none";
+        animationProgress = (newValue / 100) * TOTAL_ANIM_DURATION;
+        updateAnimation();
+        updateTimeLabel();
+      });
+
+      // -------------------- GESTIONE DEI PULSANTI --------------------
+      playButton.addEventListener("click", function () {
+        if (!animationPlaying) {
+          animationPlaying = true;
+          animationStartReal = performance.now() - animationProgress * 1000;
+        }
+      });
+      pauseButton.addEventListener("click", function () {
+        animationPlaying = false;
+      });
+      resetButton.addEventListener("click", function () {
+        animationPlaying = false;
+        animationProgress = 0;
+        timeSlider.value = 0;
+        if (originalStartDate && originalEndDate) {
+          startDateInput.value = originalStartDate.toISOString().split("T")[0];
+          endDateInput.value = originalEndDate.toISOString().split("T")[0];
+          animStartTime = new Date(originalStartDate);
+          animEndTime = new Date(originalEndDate);
+        }
+        earthquakeData = filterDataByDate();
+        createEarthquakeSpheres(earthquakeData);
+        quakeSpheres.forEach(s => s.visible = false);
+        updateTimeSliderLabels();
+        updateStatistics();
+        mapCirclesGroup.clear();
+        updateTimeLabel();
+        tooltip.style.display = "none";
+      });
+
+      // -------------------- UPDATE ANIMAZIONE (SFERE E CERCHI) --------------------
+      function updateAnimation() {
+        if (!animStartTime || !animEndTime || earthquakeData.length === 0) return;
+        const realSpan = animEndTime - animStartTime;
+        if (animationPlaying) {
+          const now = performance.now();
+          animationProgress = (now - animationStartReal) / 1000;
+          if (animationProgress > TOTAL_ANIM_DURATION) {
+            animationProgress = TOTAL_ANIM_DURATION;
+            animationPlaying = false;
+          }
+          timeSlider.value = (animationProgress / TOTAL_ANIM_DURATION) * 100;
+        }
+        const thresholdTime = new Date(animStartTime.getTime() + realSpan * (animationProgress / TOTAL_ANIM_DURATION));
+        quakeSpheres.forEach(sphere => {
+          const visible = sphere.userData.quakeTime <= thresholdTime;
+          sphere.visible = visible;
+          // Se la sfera non è più visibile e aveva attivato l'effetto fire, ripristina il materiale
+          if (!visible && sphere.userData.fireEffectActive) {
+            sphere.material = sphere.userData.originalMaterial;
+            sphere.userData.fireEffectActive = false;
+          }
+          if (sphere.userData.createMapCircle) {
+            if (visible) {
+              if (!sphere.userData.mapCircle) {
+                createMapCircleForSphere(sphere);
+              }
+            } else {
+              if (sphere.userData.mapCircle) {
+                mapCirclesGroup.remove(sphere.userData.mapCircle);
+                sphere.userData.mapCircle = null;
+              }
+            }
+          }
+        });
+        const currentFrame = Math.floor((animationProgress / TOTAL_ANIM_DURATION) * 60) + 1;
+        frameIndicator.innerText = `Frame: ${currentFrame}/60`;
+        // Aggiorna l'etichetta della data durante l'animazione
+        updateTimeLabel();
+      }
+
+      // -------------------- GESTIONE TOOLTIP --------------------
+      const fireVertexShader = `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `;
+      const fireFragmentShader = `
+        uniform float time;
+        varying vec2 vUv;
+        float firePattern(vec2 uv, float t) {
+          float value = sin(uv.y * 10.0 + t * 5.0) * 0.5 + 0.5;
+          return value;
+        }
+        void main() {
+          vec2 uv = vUv;
+          float intensity = firePattern(uv, time);
+          vec3 fireColor = mix(vec3(1.0, 0.3, 0.0), vec3(1.0, 1.0, 0.0), intensity);
+          gl_FragColor = vec4(fireColor, 1.0);
+        }
+      `;
+      function activateFireEffect(sphere) {
+        if (sphere.userData.fireEffectActive) return;
+        sphere.userData.fireEffectActive = true;
+        const fireMaterial = new THREE.ShaderMaterial({
+          vertexShader: fireVertexShader,
+          fragmentShader: fireFragmentShader,
+          uniforms: { time: { value: 0.0 } },
+          transparent: true,
+          blending: THREE.AdditiveBlending,
+        });
+        sphere.userData.originalMaterial = sphere.material;
+        sphere.material = fireMaterial;
+        const clock = new THREE.Clock();
+        function updateFire() {
+          if (sphere.userData.fireEffectActive) {
+            fireMaterial.uniforms.time.value = clock.getElapsedTime();
+            requestAnimationFrame(updateFire);
+          }
+        }
+        updateFire();
+        setTimeout(() => {
+          if (sphere.userData.fireEffectActive) {
+            sphere.material = sphere.userData.originalMaterial;
+            sphere.userData.fireEffectActive = false;
+          }
+        }, 5000);
+      }
+      const raycaster = new THREE.Raycaster();
+      const mouse = new THREE.Vector2();
+      function onClick(event) {
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+        mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(quakeSpheres);
+        if (intersects.length > 0) {
+          const sphere = intersects[0].object;
+          activateFireEffect(sphere);
+          showTooltip(event.clientX, event.clientY, sphere);
+        }
+      }
+      renderer.domElement.addEventListener("click", onClick);
+      window.closeTooltip = function () { tooltip.style.display = "none"; };
+      function showTooltip(x, y, sphere) {
+        const dt = sphere.userData.quakeTime;
+        const formattedDate = ("0" + dt.getDate()).slice(-2) + "/" + ("0" + (dt.getMonth() + 1)).slice(-2) + "/" + dt.getFullYear() + " - " +
+          ("0" + dt.getHours()).slice(-2) + ":" + ("0" + dt.getMinutes()).slice(-2) + ":" + ("0" + dt.getSeconds()).slice(-2);
+        tooltip.innerHTML = '<span class="close" onclick="closeTooltip()">X</span>' +
+          `<strong>${formattedDate}</strong><br>MD: ${sphere.userData.md}<br>Profondità: ${sphere.position.z} m`;
+        tooltip.style.left = x + "px";
+        tooltip.style.top = y + "px";
+        tooltip.style.display = "block";
+      }
+      window.addEventListener("keydown", function(event) {
+        if (event.key === "Escape") { tooltip.style.display = "none"; }
+      });
+
+      // -------------------- LOOP DI ANIMAZIONE --------------------
+      function animate() {
+        requestAnimationFrame(animate);
+        controls.update();
+        updateFaceVisibility();
+        updateAnimation();
+        updateMapCircles();
+        renderer.render(scene, camera);
+      }
+      animate();
+      window.addEventListener("resize", () => {
+        camera.aspect = window.innerWidth / window.innerHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth, window.innerHeight);
+      });
+
+      // -------------------- CARICAMENTO CSV --------------------
+      csvInput.addEventListener("change", function(event) {
+        const file = event.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = function(e) {
+          const text = e.target.result;
+          originalData = parseCSV(text);
+          originalData.sort((a, b) => a.time - b.time);
+          if (originalData.length > 0) {
+            const minDate = new Date(originalData[0].time);
+            const maxDate = new Date(originalData[originalData.length - 1].time);
+            function toDateString(d) { return d.toISOString().split("T")[0]; }
+            startDateInput.value = toDateString(minDate);
+            endDateInput.value = toDateString(maxDate);
+            if (startDateInput.value === endDateInput.value) {
+              minDate.setHours(0, 0, 0, 0);
+              maxDate.setHours(23, 59, 59, 0);
+            }
+            animStartTime = new Date(startDateInput.value);
+            animEndTime = new Date(endDateInput.value);
+            if (startDateInput.value === endDateInput.value) {
+              animStartTime.setHours(0, 0, 0, 0);
+              animEndTime.setHours(23, 59, 59, 0);
+            }
+            originalStartDate = new Date(startDateInput.value);
+            originalEndDate = new Date(endDateInput.value);
+            if (startDateInput.value === endDateInput.value) {
+              originalStartDate.setHours(0, 0, 0, 0);
+              originalEndDate.setHours(23, 59, 59, 0);
+            }
+            earthquakeData = filterDataByDate();
+            createEarthquakeSpheres(earthquakeData);
+            animationProgress = 0;
+            quakeSpheres.forEach(s => s.visible = false);
+            timeSlider.value = 0;
+            updateTimeSliderLabels();
+            updateStatistics();
+            updateTimeLabel();
+            tooltip.style.display = "none";
+            mapCirclesGroup.clear();
+          }
+        };
+        reader.readAsText(file);
+      });
+      startDateInput.addEventListener("change", function() {
+        earthquakeData = filterDataByDate();
+        createEarthquakeSpheres(earthquakeData);
+        mapCirclesGroup.clear();
+        animationProgress = 0;
+        quakeSpheres.forEach(s => s.visible = false);
+        animStartTime = new Date(this.value);
+        if (this.value === endDateInput.value) {
+          animStartTime.setHours(0, 0, 0, 0);
+          animEndTime = new Date(this.value);
+          animEndTime.setHours(23, 59, 59, 0);
+        }
+        timeSlider.value = 0;
+        updateTimeSliderLabels();
+        updateStatistics();
+        updateTimeLabel();
+        tooltip.style.display = "none";
+      });
+      endDateInput.addEventListener("change", function() {
+        earthquakeData = filterDataByDate();
+        createEarthquakeSpheres(earthquakeData);
+        mapCirclesGroup.clear();
+        animationProgress = 0;
+        quakeSpheres.forEach(s => s.visible = false);
+        animEndTime = new Date(this.value);
+        if (this.value === startDateInput.value) {
+          animStartTime = new Date(this.value);
+          animStartTime.setHours(0, 0, 0, 0);
+          animEndTime.setHours(23, 59, 59, 0);
+        }
+        timeSlider.value = 0;
+        updateTimeSliderLabels();
+        updateStatistics();
+        updateTimeLabel();
+        tooltip.style.display = "none";
+      });
+    </script>
+  </body>
+</html>
+
